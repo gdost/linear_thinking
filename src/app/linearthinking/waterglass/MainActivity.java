@@ -138,7 +138,8 @@ public class MainActivity extends Activity implements GameView.Listener {
         } else if (state == State.DOUBLE_ASK) {
             state = State.DOUBLE_ANIM;
             zoomBar.setVisibility(View.GONE);
-            result.setText("Your guess: " + Fmt.ml(ml) + ". Let's start doubling…");
+            result.setText("Your guess: " + Fmt.length(GameView.yForMl(ml)) + " high = " + Fmt.volume(ml)
+                    + ". Let's start doubling…");
             game.animateDoubling(n);
         }
     }

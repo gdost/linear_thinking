@@ -102,6 +102,7 @@ public class GameView extends View {
     private final Paint landmarkLine = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint landmarkFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint landmarkText = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint landmarkHalo = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private final RectF rect = new RectF();
@@ -161,6 +162,10 @@ public class GameView extends View {
         landmarkText.setColor(0xFF5A5650);
         landmarkText.setTextSize(12 * dp);
         landmarkText.setTextAlign(Paint.Align.CENTER);
+        landmarkHalo.set(landmarkText);
+        landmarkHalo.setColor(0xFFF7FBFF);
+        landmarkHalo.setStyle(Paint.Style.STROKE);
+        landmarkHalo.setStrokeWidth(4 * dp);
 
         hint.setColor(0x993C465A);
         hint.setTextSize(15 * dp);
@@ -488,9 +493,12 @@ public class GameView extends View {
             float h = (float) (m.heightCm * s);
             float top = base - h;
             drawShape(c, m.shape, cx, base, top, h, slot * 0.9f);
-            float ty = Math.max(top - 6 * dp, topY() + 12 * dp);
+            float ty = Math.max(top - 20 * dp, topY() + 12 * dp);
+            String height = Fmt.length(m.heightCm);
+            c.drawText(m.name, cx, ty, landmarkHalo);
+            c.drawText(height, cx, ty + 14 * dp, landmarkHalo);
             c.drawText(m.name, cx, ty, landmarkText);
-            c.drawText(Fmt.length(m.heightCm), cx, ty + 14 * dp, landmarkText);
+            c.drawText(height, cx, ty + 14 * dp, landmarkText);
         }
     }
 
