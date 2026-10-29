@@ -16,3 +16,7 @@ Plain Java + Android Canvas, no Gradle or AndroidX. Needs aapt, dx (`dalvik-exch
     ./build.sh      # -> build/water-glass-debug.apk
 
 Install on a phone: copy the APK over and open it (allow "install unknown apps"), or `adb install build/water-glass-debug.apk`.
+
+## Download
+
+Latest debug APK: [apk/water-glass.apk](https://github.com/gdost/linear_thinking/raw/main/apk/water-glass.apk)
