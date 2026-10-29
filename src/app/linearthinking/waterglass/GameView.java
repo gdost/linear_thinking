@@ -10,19 +10,25 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Draws the glass (and, for the doubling round, a giant bowl around it) in world
- * coordinates measured in centimetres. y = 0 is the floor, y grows upwards.
+ * Draws the glass in world coordinates measured in centimetres. y = 0 is the floor,
+ * y grows upwards. In the doubling round the glass is endlessly tall and the player
+ * can zoom out (pinch or slider) past landmarks before tapping a height.
  */
 public class GameView extends View {
 
     public interface Listener {
         void onGuess(double guessMl);
         void onAnimationDone();
+        void onZoomChanged(double zoom);
     }
 
     /** Glass capacity in millilitres. */
@@ -32,7 +38,32 @@ public class GameView extends View {
     /** Inner height of the glass in cm (cylinder that holds CAP ml). */
     static final double GLASS_H = CAP / (Math.PI * GLASS_R * GLASS_R);
     static final double WALL = 0.35;
-    static final double PERSON_H = 175.0;
+    /** Highest point the camera can show when fully zoomed out (cm). */
+    static final double MAX_VIEW_CM = 1.2e6;
+
+    private static final int PERSON = 0, HOUSE = 1, TOWER = 2, EIFFEL = 3, MOUNTAIN = 4;
+
+    private static final class Landmark {
+        final String name;
+        final double heightCm;
+        final int shape;
+
+        Landmark(String name, double heightCm, int shape) {
+            this.name = name;
+            this.heightCm = heightCm;
+            this.shape = shape;
+        }
+    }
+
+    private static final Landmark[] LANDMARKS = {
+            new Landmark("Person", 175, PERSON),
+            new Landmark("House", 1000, HOUSE),
+            new Landmark("Statue of Liberty", 9300, TOWER),
+            new Landmark("Eiffel Tower", 33000, EIFFEL),
+            new Landmark("Burj Khalifa", 82800, TOWER),
+            new Landmark("Mont Blanc", 480800, MOUNTAIN),
+            new Landmark("Mt Everest", 884900, MOUNTAIN),
+    };
 
     private Listener listener;
     private boolean acceptTaps;
@@ -42,18 +73,22 @@ public class GameView extends View {
     private double guessMl = Double.NaN;
     private double correctMarkMl = Double.NaN;
 
-    // Doubling round state.
-    private boolean bowlMode;
-    private double bowlR, bowlH;
-    private double zoom; // 0 = glass framing, 1 = bowl framing
+    /** Doubling round: the glass goes on forever and the camera can zoom out. */
+    private boolean endless;
+    /** 1 = glass framing; larger values show more height. */
+    private double zoom = 1;
     private int doublings;
     private double k; // current (continuous) number of doublings
     private boolean showCounter;
 
     private ValueAnimator animator;
+    private final ScaleGestureDetector scaleDetector;
+    private boolean gestureWasPinch;
+    private float downX, downY;
 
     private final Paint glassFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glassStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint glassDashed = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint water = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint waterTop = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint floor = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -62,9 +97,11 @@ public class GameView extends View {
     private final Paint label = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint counter = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint counterSub = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint bowlStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint bowlFill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint person = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ruler = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint rulerText = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint landmarkLine = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint landmarkFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint landmarkText = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private final RectF rect = new RectF();
@@ -80,6 +117,10 @@ public class GameView extends View {
         glassStroke.setStrokeWidth(3 * dp);
         glassStroke.setStrokeCap(Paint.Cap.ROUND);
         glassStroke.setStrokeJoin(Paint.Join.ROUND);
+        glassDashed.setColor(0x883C465A);
+        glassDashed.setStyle(Paint.Style.STROKE);
+        glassDashed.setStrokeWidth(1.5f * dp);
+        glassDashed.setPathEffect(new DashPathEffect(new float[]{6 * dp, 6 * dp}, 0));
 
         water.setColor(0xCC3D8FE0);
         waterTop.setColor(0xFF7DB8F0);
@@ -99,27 +140,40 @@ public class GameView extends View {
         label.setFakeBoldText(true);
 
         counter.setColor(0xFF1C2A40);
-        counter.setTextSize(30 * dp);
+        counter.setTextSize(28 * dp);
         counter.setFakeBoldText(true);
         counter.setTextAlign(Paint.Align.CENTER);
         counterSub.setColor(0xFF4A5A70);
         counterSub.setTextSize(16 * dp);
         counterSub.setTextAlign(Paint.Align.CENTER);
 
-        bowlStroke.setColor(0xFF6B5B4B);
-        bowlStroke.setStyle(Paint.Style.STROKE);
-        bowlStroke.setStrokeWidth(4 * dp);
-        bowlStroke.setStrokeJoin(Paint.Join.ROUND);
-        bowlFill.setColor(0x0A806040);
+        ruler.setColor(0x553C465A);
+        ruler.setStrokeWidth(1 * dp);
+        rulerText.setColor(0x993C465A);
+        rulerText.setTextSize(11 * dp);
 
-        person.setColor(0xFF555555);
-        person.setStrokeWidth(3 * dp);
-        person.setStrokeCap(Paint.Cap.ROUND);
-        person.setStyle(Paint.Style.STROKE);
+        landmarkLine.setColor(0xFF6E6A64);
+        landmarkLine.setStyle(Paint.Style.STROKE);
+        landmarkLine.setStrokeWidth(2 * dp);
+        landmarkLine.setStrokeCap(Paint.Cap.ROUND);
+        landmarkLine.setStrokeJoin(Paint.Join.ROUND);
+        landmarkFill.setColor(0x33A09888);
+        landmarkText.setColor(0xFF5A5650);
+        landmarkText.setTextSize(12 * dp);
+        landmarkText.setTextAlign(Paint.Align.CENTER);
 
         hint.setColor(0x993C465A);
         hint.setTextSize(15 * dp);
         hint.setTextAlign(Paint.Align.CENTER);
+
+        scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector d) {
+                gestureWasPinch = true;
+                setZoom(zoom / d.getScaleFactor());
+                return true;
+            }
+        });
     }
 
     public void setListener(Listener l) {
@@ -127,17 +181,28 @@ public class GameView extends View {
     }
 
     /** Reset to a glass with the start amount, waiting for a tap. */
-    public void reset(double baseMl) {
+    public void reset(double baseMl, boolean endless) {
         cancelAnim();
         this.baseMl = baseMl;
+        this.endless = endless;
         volumeMl = baseMl;
         guessMl = Double.NaN;
         correctMarkMl = Double.NaN;
-        bowlMode = false;
-        zoom = 0;
         showCounter = false;
         acceptTaps = true;
+        setZoom(1);
+    }
+
+    public double maxZoom() {
+        return Math.max(1, MAX_VIEW_CM / viewTopAtZoom1());
+    }
+
+    public void setZoom(double z) {
+        z = Math.max(1, Math.min(maxZoom(), z));
+        if (z == zoom) return;
+        zoom = z;
         invalidate();
+        if (listener != null) listener.onZoomChanged(zoom);
     }
 
     /** Linear round: fill from the start amount up to target. */
@@ -167,21 +232,15 @@ public class GameView extends View {
         animator.start();
     }
 
-    /** Doubling round: double the water n times, overflow into a giant bowl, zoom out. */
+    /** Doubling round: double the water n times; the camera follows the column up. */
     public void animateDoubling(final int n) {
         cancelAnim();
         doublings = n;
         final double finalMl = baseMl * Math.pow(2, n);
-        // A wide bowl (height = 0.55 * radius) that ends up about 70 % full.
-        bowlR = Math.cbrt(finalMl / (0.70 * 0.55 * Math.PI));
-        bowlR = Math.max(bowlR, GLASS_R * 6);
-        bowlH = 0.55 * bowlR;
-        bowlMode = true;
+        final double vt1 = viewTopAtZoom1();
+        final double guessZoom = yForMl(guessMl) * 1.25 / vt1;
         showCounter = true;
         k = 0;
-
-        final double kFull = Math.log(CAP / baseMl) / Math.log(2);
-        final double zoomSpan = Math.max(1.5, Math.min(4.5, n - kFull - 2));
 
         animator = ValueAnimator.ofFloat(0f, (float) n);
         animator.setDuration(n * 600L);
@@ -192,10 +251,12 @@ public class GameView extends View {
             public void onAnimationUpdate(ValueAnimator a) {
                 k = (Float) a.getAnimatedValue();
                 volumeMl = baseMl * Math.pow(2, k);
-                double z = (k - kFull) / zoomSpan;
-                z = Math.max(0, Math.min(1, z));
-                zoom = z * z * (3 - 2 * z); // smoothstep
-                invalidate();
+                // Follow the water; over the last doublings also bring the guess into view.
+                double waterZoom = yForMl(volumeMl) * 1.3 / vt1;
+                double t = Math.max(0, (k - 0.8 * doublings) / (0.2 * doublings));
+                t = Math.min(1, t);
+                double z = Math.max(waterZoom, guessZoom * t * t * (3 - 2 * t));
+                zoomNoClamp(Math.max(1, z));
             }
         });
         animator.addListener(new AnimatorListenerAdapter() {
@@ -203,12 +264,17 @@ public class GameView extends View {
             public void onAnimationEnd(Animator a) {
                 k = doublings;
                 volumeMl = finalMl;
-                zoom = 1;
-                invalidate();
+                correctMarkMl = finalMl;
+                zoomNoClamp(Math.max(1, Math.max(yForMl(finalMl) * 1.3 / vt1, guessZoom)));
                 if (listener != null) listener.onAnimationDone();
             }
         });
         animator.start();
+    }
+
+    private void zoomNoClamp(double z) {
+        zoom = z;
+        invalidate();
     }
 
     private void cancelAnim() {
@@ -232,33 +298,23 @@ public class GameView extends View {
         return getHeight() * 0.90f;
     }
 
+    private float topY() {
+        return 84 * dp;
+    }
+
+    /** Pixels per cm at zoom 1 (the glass framing). */
     private double scaleGlass() {
-        double byH = getHeight() * 0.62 / GLASS_H;
-        double byW = getWidth() * 0.42 / (2 * (GLASS_R + WALL));
+        double byH = (groundY() - topY()) / (GLASS_H * 1.35);
+        double byW = getWidth() * 0.30 / (2 * (GLASS_R + WALL));
         return Math.min(byH, byW);
     }
 
-    private boolean showPerson() {
-        return bowlMode && bowlH > 35;
-    }
-
-    private double scaleBowl() {
-        double halfW = bowlR * 1.12;
-        double needH = bowlH * 1.25;
-        if (showPerson()) {
-            halfW = Math.max(halfW, bowlR + 110);
-            needH = Math.max(needH, PERSON_H * 1.15);
-        }
-        double byW = getWidth() * 0.96 / (2 * halfW);
-        double byH = getHeight() * 0.62 / needH;
-        return Math.min(byW, byH);
+    private double viewTopAtZoom1() {
+        return getHeight() == 0 ? GLASS_H * 1.35 : (groundY() - topY()) / scaleGlass();
     }
 
     private double scale() {
-        double a = scaleGlass();
-        if (!bowlMode || zoom <= 0) return a;
-        double b = scaleBowl();
-        return Math.exp(Math.log(a) * (1 - zoom) + Math.log(b) * zoom);
+        return scaleGlass() / zoom;
     }
 
     private float sx(double x, double s) {
@@ -283,16 +339,29 @@ public class GameView extends View {
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         if (!acceptTaps) return true;
-        if (e.getAction() == MotionEvent.ACTION_UP) {
-            double s = scaleGlass();
-            double y = (groundY() - e.getY()) / s;
-            if (y < 0) y = 0;
-            // Taps above the rim count as "as if the glass were taller".
-            double ml = Math.max(1, mlForY(y));
-            guessMl = ml;
-            acceptTaps = false;
-            invalidate();
-            if (listener != null) listener.onGuess(ml);
+        if (endless) scaleDetector.onTouchEvent(e);
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                gestureWasPinch = false;
+                downX = e.getX();
+                downY = e.getY();
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+                gestureWasPinch = true;
+                break;
+            case MotionEvent.ACTION_UP:
+                float moved = Math.abs(e.getX() - downX) + Math.abs(e.getY() - downY);
+                if (gestureWasPinch || moved > 16 * dp) break;
+                double y = (groundY() - e.getY()) / scale();
+                if (y < 0) y = 0;
+                // Above the rim counts "as if the glass were taller".
+                guessMl = Math.max(1, mlForY(y));
+                acceptTaps = false;
+                invalidate();
+                if (listener != null) listener.onGuess(guessMl);
+                break;
+            default:
+                break;
         }
         return true;
     }
@@ -304,61 +373,58 @@ public class GameView extends View {
         c.drawColor(0xFFF7FBFF);
         double s = scale();
         float gy = groundY();
+
+        if (endless) {
+            drawRuler(c, s);
+            drawLandmarks(c, s);
+        }
         c.drawRect(0, gy, getWidth(), getHeight(), floor);
 
-        double bowlLevel = 0;
-        if (bowlMode) {
-            double inBowl = Math.max(0, volumeMl - CAP);
-            bowlLevel = inBowl / (Math.PI * bowlR * bowlR);
-            drawBowl(c, s, bowlLevel);
-            if (showPerson()) drawPerson(c, s, bowlR + 55);
+        drawGlass(c, s);
+
+        if (!Double.isNaN(guessMl)) drawMark(c, s, yForMl(guessMl), guessPaint, 0xFFE03C3C, "your guess", true);
+        if (!Double.isNaN(correctMarkMl)) {
+            double y = yForMl(endless ? correctMarkMl : Math.min(correctMarkMl, CAP));
+            drawMark(c, s, y, correctPaint, 0xFF1E9E50, "correct", false);
         }
-
-        drawGlass(c, s, bowlLevel);
-
-        if (!Double.isNaN(guessMl)) drawGuess(c, s);
-        if (!Double.isNaN(correctMarkMl)) drawCorrect(c, s);
 
         if (acceptTaps) {
-            c.drawText("tap a height", getWidth() / 2f, gy + 22 * dp, hint);
-        }
-
-        if (bowlMode && zoom > 0.6) {
-            label.setColor(0xFF6B5B4B);
-            label.setTextAlign(Paint.Align.CENTER);
-            label.setAlpha((int) (255 * Math.min(1, (zoom - 0.6) / 0.4)));
-            c.drawText("bowl: " + Fmt.length(2 * bowlR) + " wide, " + Fmt.length(bowlH) + " deep",
-                    getWidth() / 2f, gy + 22 * dp, label);
-            label.setAlpha(255);
+            c.drawText(endless ? "pinch or slide to zoom out, then tap a height" : "tap a height",
+                    getWidth() / 2f, gy + 22 * dp, hint);
         }
 
         if (showCounter) drawCounter(c);
     }
 
-    private void drawGlass(Canvas c, double s, double bowlLevel) {
-        float l = sx(-GLASS_R, s), r = sx(GLASS_R, s);
-        float lo = sx(-GLASS_R - WALL, s), ro = sx(GLASS_R + WALL, s);
-        float bottom = sy(0, s), top = sy(GLASS_H, s), inBottom = sy(WALL, s);
+    /** Glass edges in screen x, widened to stay visible when zoomed far out. */
+    private float[] glassX(double s) {
+        float cx = getWidth() / 2f;
+        float half = (float) Math.max(GLASS_R * s, 3 * dp);
+        float wall = (float) Math.max(WALL * s, 1.2 * dp);
+        return new float[]{cx - half, cx + half, cx - half - wall, cx + half + wall};
+    }
+
+    private void drawGlass(Canvas c, double s) {
+        float[] gx = glassX(s);
+        float l = gx[0], r = gx[1], lo = gx[2], ro = gx[3];
+        float bottom = sy(0, s), top = sy(GLASS_H, s);
+        float inBottom = Math.min(sy(WALL, s), bottom - 1 * dp);
 
         rect.set(l, top, r, inBottom);
         c.drawRect(rect, glassFill);
 
-        float wTop = sy(yForMl(Math.min(volumeMl, CAP)), s);
-        if (volumeMl > 0) {
-            rect.set(l, wTop, r, inBottom);
-            c.drawRect(rect, water);
-            c.drawLine(l, wTop, r, wTop, waterTop);
+        if (endless) {
+            // The imagined, endlessly tall part of the glass.
+            c.drawRect(l, 0, r, top, glassFill);
+            c.drawLine(lo, top, lo, 0, glassDashed);
+            c.drawLine(ro, top, ro, 0, glassDashed);
         }
 
-        // Overflow: streams running down the outside of the glass.
-        if (bowlMode && volumeMl > CAP && bowlLevel < GLASS_H) {
-            float sw = (float) Math.max(2.5 * dp, 0.6 * s);
-            float streamBottom = sy(bowlLevel, s);
-            c.drawRect(lo - sw, top, lo, streamBottom, water);
-            c.drawRect(ro, top, ro + sw, streamBottom, water);
-            float bulge = (float) Math.max(2 * dp, 0.5 * s);
-            rect.set(lo - sw, top - bulge, ro + sw, top + bulge);
-            c.drawOval(rect, water);
+        double ml = endless ? volumeMl : Math.min(volumeMl, CAP);
+        float wTop = Math.min(sy(yForMl(ml), s), inBottom - 1 * dp);
+        if (volumeMl > 0) {
+            c.drawRect(l, wTop, r, inBottom, water);
+            c.drawLine(l, wTop, r, wTop, waterTop);
         }
 
         float sw = (float) Math.max(1.2 * dp, Math.min(3 * dp, WALL * s));
@@ -371,90 +437,126 @@ public class GameView extends View {
         c.drawPath(path, glassStroke);
     }
 
-    private void drawBowl(Canvas c, double s, double level) {
-        float l = sx(-bowlR, s), r = sx(bowlR, s);
-        float bottom = sy(0, s), top = sy(bowlH, s);
-        float corner = (float) (bowlR * 0.12 * s);
-
-        rect.set(l, top, r, bottom);
-        c.drawRect(rect, bowlFill);
-
-        if (level > 0) {
-            float wt = sy(Math.min(level, bowlH), s);
-            c.save();
-            path.reset();
-            path.moveTo(l, top);
-            path.lineTo(l, bottom - corner);
-            path.quadTo(l, bottom, l + corner, bottom);
-            path.lineTo(r - corner, bottom);
-            path.quadTo(r, bottom, r, bottom - corner);
-            path.lineTo(r, top);
-            path.close();
-            c.clipPath(path);
-            c.drawRect(l, wt, r, bottom, water);
-            c.drawLine(l, wt, r, wt, waterTop);
-            c.restore();
+    private void drawMark(Canvas c, double s, double y, Paint line, int color, String text, boolean right) {
+        float yy = sy(y, s);
+        float[] gx = glassX(s);
+        float x0 = gx[2] - 14 * dp, x1 = gx[3] + 14 * dp;
+        c.drawLine(x0, yy, x1, yy, line);
+        label.setColor(color);
+        String t = endless ? text + " · " + Fmt.length(y) : text;
+        if (right) {
+            label.setTextAlign(Paint.Align.LEFT);
+            c.drawText(t, x1 + 6 * dp, yy + 5 * dp, label);
+        } else {
+            label.setTextAlign(Paint.Align.RIGHT);
+            c.drawText(t, x0 - 6 * dp, yy + 5 * dp, label);
         }
+    }
 
+    private void drawRuler(Canvas c, double s) {
+        double visible = (groundY() - topY()) / s;
+        double raw = visible / 6;
+        double mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        double step = mag;
+        if (raw / mag > 5) step = 10 * mag;
+        else if (raw / mag > 2) step = 5 * mag;
+        else if (raw / mag > 1) step = 2 * mag;
+        float x0 = 8 * dp, x1 = 18 * dp;
+        rulerText.setTextAlign(Paint.Align.LEFT);
+        for (double y = step; y <= visible * 1.1; y += step) {
+            float yy = sy(y, s);
+            c.drawLine(x0, yy, getWidth(), yy, ruler);
+            c.drawText(Fmt.length(y), x1, yy - 3 * dp, rulerText);
+        }
+    }
+
+    private void drawLandmarks(Canvas c, double s) {
+        float minPx = 28 * dp;
+        float maxPx = (groundY() - topY()) * 3f;
+        List<Landmark> shown = new ArrayList<Landmark>();
+        for (Landmark m : LANDMARKS) {
+            double px = m.heightCm * s;
+            if (px >= minPx && px <= maxPx) shown.add(m);
+        }
+        if (shown.isEmpty()) return;
+        float left = getWidth() * 0.60f, right = getWidth() * 0.96f;
+        float slot = (right - left) / shown.size();
+        for (int i = 0; i < shown.size(); i++) {
+            Landmark m = shown.get(i);
+            float cx = left + slot * (i + 0.5f);
+            float base = groundY();
+            float h = (float) (m.heightCm * s);
+            float top = base - h;
+            drawShape(c, m.shape, cx, base, top, h, slot * 0.9f);
+            float ty = Math.max(top - 6 * dp, topY() + 12 * dp);
+            c.drawText(m.name, cx, ty, landmarkText);
+            c.drawText(Fmt.length(m.heightCm), cx, ty + 14 * dp, landmarkText);
+        }
+    }
+
+    private void drawShape(Canvas c, int shape, float cx, float base, float top, float h, float maxW) {
         path.reset();
-        path.moveTo(l - 6 * dp, top);
-        path.lineTo(l, top);
-        path.lineTo(l, bottom - corner);
-        path.quadTo(l, bottom, l + corner, bottom);
-        path.lineTo(r - corner, bottom);
-        path.quadTo(r, bottom, r, bottom - corner);
-        path.lineTo(r, top);
-        path.lineTo(r + 6 * dp, top);
-        c.drawPath(path, bowlStroke);
-    }
-
-    private void drawPerson(Canvas c, double s, double x) {
-        double h = PERSON_H;
-        double head = h * 0.065;
-        float cx = sx(x, s);
-        float sw = (float) Math.max(1.5 * dp, Math.min(4 * dp, 3.0 * s));
-        person.setStrokeWidth(sw);
-        c.drawCircle(cx, sy(h - head, s), (float) (head * s), person);
-        c.drawLine(cx, sy(h - 2 * head, s), cx, sy(h * 0.47, s), person);
-        c.drawLine(cx, sy(h * 0.47, s), sx(x - h * 0.08, s), sy(0, s), person);
-        c.drawLine(cx, sy(h * 0.47, s), sx(x + h * 0.08, s), sy(0, s), person);
-        c.drawLine(sx(x - h * 0.12, s), sy(h * 0.55, s), cx, sy(h * 0.78, s), person);
-        c.drawLine(sx(x + h * 0.12, s), sy(h * 0.55, s), cx, sy(h * 0.78, s), person);
-        label.setColor(0xFF555555);
-        label.setTextAlign(Paint.Align.CENTER);
-        c.drawText("1.75 m", cx, sy(h, s) - 8 * dp, label);
-    }
-
-    private void drawGuess(Canvas c, double s) {
-        double gs = scaleGlass();
-        // The guess is always relative to the glass, so draw it in the glass frame scaled with the camera.
-        double y = yForMl(guessMl);
-        float yy = sy(y, s);
-        float x0 = sx(-GLASS_R - WALL, s) - 14 * dp, x1 = sx(GLASS_R + WALL, s) + 14 * dp;
-        c.drawLine(x0, yy, x1, yy, guessPaint);
-        label.setColor(0xFFE03C3C);
-        label.setTextAlign(Paint.Align.LEFT);
-        if (s >= gs * 0.5) {
-            c.drawText("your guess", x1 + 6 * dp, yy + 5 * dp, label);
+        switch (shape) {
+            case PERSON: {
+                float head = h * 0.065f;
+                c.drawCircle(cx, top + head, head, landmarkLine);
+                c.drawLine(cx, top + 2 * head, cx, base - h * 0.47f, landmarkLine);
+                c.drawLine(cx, base - h * 0.47f, cx - h * 0.08f, base, landmarkLine);
+                c.drawLine(cx, base - h * 0.47f, cx + h * 0.08f, base, landmarkLine);
+                c.drawLine(cx - h * 0.12f, base - h * 0.55f, cx, base - h * 0.78f, landmarkLine);
+                c.drawLine(cx + h * 0.12f, base - h * 0.55f, cx, base - h * 0.78f, landmarkLine);
+                return;
+            }
+            case HOUSE: {
+                float w = Math.min(h * 0.9f, maxW) / 2;
+                float eave = top + h * 0.4f;
+                path.moveTo(cx - w, base);
+                path.lineTo(cx - w, eave);
+                path.lineTo(cx, top);
+                path.lineTo(cx + w, eave);
+                path.lineTo(cx + w, base);
+                break;
+            }
+            case TOWER: {
+                float w = Math.min(h * 0.12f, maxW) / 2;
+                path.moveTo(cx - w, base);
+                path.lineTo(cx - w * 0.5f, top + h * 0.1f);
+                path.lineTo(cx, top);
+                path.lineTo(cx + w * 0.5f, top + h * 0.1f);
+                path.lineTo(cx + w, base);
+                break;
+            }
+            case EIFFEL: {
+                float w = Math.min(h * 0.38f, maxW) / 2;
+                path.moveTo(cx - w, base);
+                path.quadTo(cx - w * 0.25f, base - h * 0.45f, cx - w * 0.06f, top + h * 0.08f);
+                path.lineTo(cx, top);
+                path.lineTo(cx + w * 0.06f, top + h * 0.08f);
+                path.quadTo(cx + w * 0.25f, base - h * 0.45f, cx + w, base);
+                break;
+            }
+            default: { // MOUNTAIN
+                float w = Math.min(h * 1.6f, maxW) / 2;
+                path.moveTo(cx - w, base);
+                path.lineTo(cx - w * 0.35f, top + h * 0.35f);
+                path.lineTo(cx - w * 0.1f, top + h * 0.2f);
+                path.lineTo(cx, top);
+                path.lineTo(cx + w * 0.4f, top + h * 0.4f);
+                path.lineTo(cx + w, base);
+                break;
+            }
         }
-    }
-
-    private void drawCorrect(Canvas c, double s) {
-        double y = yForMl(Math.min(correctMarkMl, CAP));
-        float yy = sy(y, s);
-        float x0 = sx(-GLASS_R - WALL, s) - 14 * dp, x1 = sx(GLASS_R + WALL, s) + 14 * dp;
-        c.drawLine(x0, yy, x1, yy, correctPaint);
-        label.setColor(0xFF1E9E50);
-        label.setTextAlign(Paint.Align.RIGHT);
-        c.drawText("correct", x0 - 6 * dp, yy + 5 * dp, label);
+        path.close();
+        c.drawPath(path, landmarkFill);
+        c.drawPath(path, landmarkLine);
     }
 
     private void drawCounter(Canvas c) {
         int step = (int) Math.floor(k + 1e-6);
         double shown = baseMl * Math.pow(2, step);
-        float y = 40 * dp;
+        float y = 34 * dp;
         c.drawText(Fmt.pow2(step) + " × " + Fmt.ml(baseMl), getWidth() / 2f, y, counter);
-        c.drawText("= " + Fmt.volume(shown) + "  (" + Fmt.glasses(shown / CAP) + ")",
-                getWidth() / 2f, y + 26 * dp, counterSub);
+        c.drawText("= " + Fmt.volume(shown) + " · " + Fmt.length(yForMl(shown)) + " high",
+                getWidth() / 2f, y + 24 * dp, counterSub);
     }
 }
