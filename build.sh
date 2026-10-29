@@ -2,8 +2,7 @@
 # Builds a signed debug APK with the plain Android SDK tools (no Gradle).
 set -e
 cd "$(dirname "$0")"
-SDK=${ANDROID_HOME:-/usr/lib/android-sdk}
-JAR=$SDK/platforms/android-23/android.jar
+JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 rm -rf build && mkdir -p build/classes
 aapt package -f -M AndroidManifest.xml -S res -I "$JAR" -J build -F build/app.unsigned.apk
 javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 -bootclasspath "$JAR" \
