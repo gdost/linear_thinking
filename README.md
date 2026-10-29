@@ -19,4 +19,7 @@ Install on a phone: copy the APK over and open it (allow "install unknown apps")
 
 ## Download
 
-Latest debug APK: [apk/water-glass.apk](https://github.com/gdost/linear_thinking/raw/main/apk/water-glass.apk)
+Every push to `main` builds the app and publishes it as the [latest release](https://github.com/gdost/linear_thinking/releases/tag/latest).
+Direct link for your phone: https://github.com/gdost/linear_thinking/releases/download/latest/water-glass.apk
+
+The APK is signed with the debug key in `debug.keystore` (password `android`), so new builds install over old ones.
