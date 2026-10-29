@@ -9,6 +9,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import java.util.Random;
@@ -21,6 +22,8 @@ public class MainActivity extends Activity implements GameView.Listener {
     private GameView game;
     private TextView question;
     private TextView result;
+    private SeekBar zoomBar;
+    private boolean syncingZoom;
     private Button button;
 
     private State state;
@@ -48,6 +51,26 @@ public class MainActivity extends Activity implements GameView.Listener {
         game = new GameView(this);
         game.setListener(this);
         root.addView(game, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        zoomBar = new SeekBar(this);
+        zoomBar.setMax(1000);
+        zoomBar.setPadding(dp(24), dp(8), dp(24), dp(8));
+        root.addView(zoomBar, new LinearLayout.LayoutParams(-1, -2));
+        zoomBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int p, boolean fromUser) {
+                if (!fromUser || syncingZoom) return;
+                game.setZoom(Math.pow(game.maxZoom(), p / 1000.0));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+            }
+        });
 
         result = new TextView(this);
         result.setTextColor(0xFF1C2A40);
@@ -86,7 +109,8 @@ public class MainActivity extends Activity implements GameView.Listener {
         double hi = Math.min(25, 0.92 * GameView.CAP / n);
         base = Math.round(lo + random.nextDouble() * (hi - lo));
         state = State.LINEAR_ASK;
-        game.reset(base);
+        game.reset(base, false);
+        zoomBar.setVisibility(View.GONE);
         question.setText("The glass holds " + Fmt.ml(base) + " of water.\n"
                 + "Where would " + n + " × this amount reach? Tap the height.");
         result.setText("");
@@ -95,9 +119,11 @@ public class MainActivity extends Activity implements GameView.Listener {
 
     private void startDoubling() {
         state = State.DOUBLE_ASK;
-        game.reset(base);
-        question.setText("Again " + Fmt.ml(base) + ". Now double it " + n + " times:\n"
-                + "where would " + Fmt.pow2(n) + " × this amount reach? Tap the height.");
+        game.reset(base, true);
+        zoomBar.setProgress(0);
+        zoomBar.setVisibility(View.VISIBLE);
+        question.setText("Again " + Fmt.ml(base) + ". Imagine the glass is endlessly tall.\n"
+                + "Where would " + Fmt.pow2(n) + " × this amount reach?");
         result.setText("");
         button.setVisibility(View.INVISIBLE);
     }
@@ -111,9 +137,18 @@ public class MainActivity extends Activity implements GameView.Listener {
             game.animateLinear(n * base);
         } else if (state == State.DOUBLE_ASK) {
             state = State.DOUBLE_ANIM;
-            result.setText("Your guess: " + Fmt.ml(ml) + ". Let's start doubling…");
+            zoomBar.setVisibility(View.GONE);
+            result.setText("Your guess: " + Fmt.length(GameView.yForMl(ml)) + " high = " + Fmt.volume(ml)
+                    + ". Let's start doubling…");
             game.animateDoubling(n);
         }
+    }
+
+    @Override
+    public void onZoomChanged(double zoom) {
+        syncingZoom = true;
+        zoomBar.setProgress((int) Math.round(1000 * Math.log(zoom) / Math.log(game.maxZoom())));
+        syncingZoom = false;
     }
 
     @Override
@@ -132,11 +167,15 @@ public class MainActivity extends Activity implements GameView.Listener {
             state = State.DOUBLE_DONE;
             double correct = base * Math.pow(2, n);
             double ratio = correct / guess;
-            result.setText("Your guess: " + Fmt.ml(guess) + " (" + Fmt.factor(guess / base) + " × the start)\n"
+            String verdict;
+            if (ratio > 1.15) verdict = "Your guess was " + Fmt.factor(ratio) + " times too low. "
+                    + "We think in straight lines, not in doublings.";
+            else if (ratio < 1 / 1.15) verdict = "Your guess was " + Fmt.factor(1 / ratio) + " times too high!";
+            else verdict = "Spot on! You think exponentially.";
+            result.setText("Your guess: " + Fmt.length(GameView.yForMl(guess)) + " high = " + Fmt.volume(guess) + "\n"
                     + "Correct: " + Fmt.pow2(n) + " × " + Fmt.ml(base) + " = " + Fmt.volume(correct)
-                    + " = " + Fmt.glasses(correct / GameView.CAP) + "\n"
-                    + "Your guess was " + Fmt.factor(ratio) + " times too small. "
-                    + "We think in straight lines, not in doublings.");
+                    + " = " + Fmt.length(GameView.yForMl(correct)) + " high\n"
+                    + verdict);
             button.setText("Play again");
             button.setVisibility(View.VISIBLE);
         }
